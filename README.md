@@ -1,37 +1,189 @@
-# SD-CDM: 教育场景下的认知诊断模型（Search & Recommendation Enhanced）
+# SD-CDM: Strategy-Aware Dual-Channel Cognitive Diagnosis Model
 
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-orange.svg)](https://pytorch.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+> **Paper:** *Strategy-Aware Dual-Channel Cognitive Diagnosis Model (SD-CDM)*  
+> **Status:** Under Review — *Expert Systems with Applications*
 
-**项目地址**：本仓库为作者研究生期间的科研项目，论文《SD-CDM: A Structured Dynamic Cognitive Diagnosis Model for Intelligent Tutoring Systems》正在 **Expert Systems with Applications** 期刊 **under review**。
+---
 
-## 🎯 项目背景
+## Overview
 
-在智慧教育（Intelligent Tutoring Systems, ITS）领域，**认知诊断（Cognitive Diagnosis）** 是实现个性化学习的核心技术。它能够精确评估学生对每个知识点的掌握程度（知识状态），从而为学生**精准推荐**适合的学习资源、练习题目或学习路径。
+SD-CDM addresses three structural limitations of existing deep learning-based Cognitive Diagnosis Models (CDMs):
 
-本项目提出 **SD-CDM（Structured Dynamic Cognitive Diagnosis Model）**，创新性地将结构化知识建模与动态学生行为建模相结合，使模型在**教育搜索与推荐场景**中表现更优：
-- **搜索场景**：快速召回学生当前最需要的知识点或题目（类似搜索引擎的召回+排序）。
-- **推荐场景**：基于认知诊断结果，个性化推荐学习材料，提升学习效率和准确率。
+1. **Conflation of noise and active misconceptions** — standard models map low scores to a single near-zero scalar, unable to distinguish "not yet learned" from "learned incorrectly."
+2. **Strategy homogeneity assumption** — existing models assign static concept weights, ignoring individual problem-solving habits.
+3. **Semantic gap for LLM integration** — opaque scalar outputs provide insufficient grounding for downstream language models.
 
-该模型已在真实教育数据集上验证，显著优于传统CDM（如IRT、DINA、NCDM等），为教育AI产品（如智能学习机、作业平台、知识图谱推荐系统）提供了可落地的算法支撑。
+SD-CDM solves these with two core modules:
 
-**核心应用场景**：
-- 在线教育平台的个性化题目推荐
-- 学生知识弱点诊断与针对性搜索
-- 智能教学系统中内容画像构建与用户行为分析
+| Module | Role |
+|--------|------|
+| **BiKD** (Bidirectional Knowledge Diagnostic) | Decouples student state into orthogonal *Positive Mastery* h⁺ and *Negative Misconception* h⁻ vectors, with a learnable per-exercise Trap Intensity coefficient μⱼ |
+| **CAM** (Cognitive Attention Machine) | Driven by a latent *Student Habit Vector*, dynamically allocates attention weights over required concepts to simulate personalised cognitive activation |
 
+---
 
-## 📦 安装依赖
+## Architecture
+
+```
+Input (student_id, exercise_id, Q-matrix row)
+        │
+        ▼
+┌─────────────────────────────────┐
+│  Stage 1 · BiKD                 │
+│  h⁺ = σ(E_pos[i])   h⁻ = σ(E_neg[i])   μⱼ = σ(mⱼ)  │
+└────────────────┬────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────┐
+│  Stage 2 · CAM                  │
+│  α_ijk = softmax(MLP([v_habit ║ eⱼ ║ cₖ]) | Q-mask) │
+└────────────────┬────────────────┘
+                 │
+                 ▼
+┌─────────────────────────────────┐
+│  Stage 3 · Prediction           │
+│  Ŝᵢⱼ = Σₖ αᵢⱼₖ(h⁺ᵢₖ − μⱼh⁻ᵢₖ) − dⱼ   ŷ = σ(Ŝᵢⱼ) │
+└─────────────────────────────────┘
+```
+
+---
+
+## Quick Start
+
+### Installation
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/你的用户名/sd-cdm-education-search.git
-cd sd-cdm-education-search
+pip install torch scikit-learn tqdm EduCDM
+```
 
-# 2. 创建虚拟环境（推荐）
-conda create -n sdcmd python=3.10
-conda activate sdcmd
+### Basic Usage
 
-# 3. 安装依赖
-pip install -r requirements.txt
+```python
+from SDCDM import SDCDM
+
+# Initialise model
+model = SDCDM(
+    knowledge_n=110,   # number of knowledge concepts
+    exer_n=26660,      # number of exercises
+    student_n=4151,    # number of students
+    hidden_dim=64      # embedding dimension for CAM
+)
+
+# Train
+model.train(
+    train_data=train_loader,
+    test_data=test_loader,
+    epoch=20,
+    device="cuda",
+    lr=0.001,
+    lam=0.1,      # weight of margin regularisation λ
+    margin=0.1    # margin hyper-parameter ε
+)
+
+# Evaluate
+auc, acc = model.eval(test_loader, device="cuda")
+print(f"AUC: {auc:.4f}  ACC: {acc:.4f}")
+
+# Save / load
+model.save("sdcdm_assist09.pt")
+model.load("sdcdm_assist09.pt")
+```
+
+### DataLoader Format
+
+Each batch should yield a 4-tuple:
+
+```python
+(user_id, item_id, knowledge_emb, y)
+# user_id       : LongTensor  (B,)
+# item_id       : LongTensor  (B,)
+# knowledge_emb : FloatTensor (B, K)  — Q-matrix row for the exercise
+# y             : FloatTensor (B,)    — binary response label {0, 1}
+```
+
+This is identical to the format used by [EduCDM](https://github.com/bigdata-ustc/EduCDM).
+
+### Extracting Diagnostic Profiles
+
+```python
+import torch
+
+student_ids = torch.arange(100)   # first 100 students
+profiles = model.get_student_profiles(student_ids, device="cuda")
+
+# profiles["pos_mastery"]        → (100, K)  Positive Mastery h⁺
+# profiles["neg_misconception"]  → (100, K)  Negative Misconception h⁻
+# profiles["habit_vector"]       → (100, D)  Latent Habit Vector v_habit
+```
+
+These three tensors can be serialised as structured semantic priors for downstream LLMs.
+
+---
+
+## Datasets
+
+Experiments are conducted on three public ASSISTments benchmarks:
+
+| Dataset | Students | Exercises | Concepts | Interactions | Sparsity |
+|---------|----------|-----------|----------|--------------|----------|
+| ASSIST09 | 4,151 | 26,660 | 110 | 325,637 | 99.70% |
+| ASSIST15 | 19,840 | 100 | 100 | 683,203 | 65.56% |
+| ASSIST17 | 1,709 | 3,162 | 102 | 942,816 | 82.55% |
+
+Download from the [ASSISTments website](https://sites.google.com/site/assistmentsdata/).
+
+---
+
+## Results (5-fold CV)
+
+| Model | ASSIST09 AUC | ASSIST15 AUC | ASSIST17 AUC |
+|-------|-------------|-------------|-------------|
+| DINA | 0.7412 | 0.6585 | 0.6994 |
+| IRT | 0.7511 | 0.6645 | 0.7890 |
+| NCDM | 0.7572 | 0.6692 | 0.7641 |
+| SCD | 0.7813 | 0.7021 | 0.7925 |
+| **SD-CDM (Ours)** | **0.7972** | **0.7096** | **0.8000** |
+
+---
+
+## Hyper-parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `hidden_dim` | 64 | Embedding dimension D for CAM |
+| `lr` | 0.001 | Adam learning rate |
+| `lam` | 0.1 | Margin regularisation weight λ |
+| `margin` | 0.1 | Margin ε in L_reg |
+| `weight_decay` | 1e-4 | L2 regularisation λ_Θ |
+| Batch size | 256 | — |
+| Early stopping | 10 epochs | Based on validation AUC |
+
+Trap intensity is initialised from U(−2.0, −1.0), giving μⱼ ∈ (0.12, 0.27) at the start of training.
+
+---
+
+## Baseline
+
+The NCDM baseline (`NCDM.py`) is included for direct comparison. It is taken from [Wang et al. (2022)](https://ieeexplore.ieee.org/document/9865139) via the EduCDM library.
+
+---
+
+## Citation
+
+If you find this work useful, please cite:
+
+```bibtex
+@article{sdcdm2026,
+  title   = {Strategy-Aware Dual-Channel Cognitive Diagnosis Model},
+  author  = {[Authors]},
+  journal = {Expert Systems with Applications},
+  year    = {2026},
+  note    = {Under Review}
+}
+```
+
+---
+
+## License
+
+MIT
